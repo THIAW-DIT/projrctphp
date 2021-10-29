@@ -1,0 +1,230 @@
+À propos de ce tutoriel
+Dans ce tutoriel je vous propose de découvrir comment créer un système de compte utilisateur en PHP. Nous allons donc apprendre à créer :
+
+Une partie inscription, avec confirmation par email des comptes utilisateurs.
+Une partie connexion / déconnexion, avec une option "Se souvenir de moi" basée sur l'utilisation des cookies.
+Une option "rappel du mot de passe" pour les utilisateurs un petit peu tête en l'air.
+Une partie réservé aux membres avec la possibilités de changer son mot de passe.
+Pour cette première partie nous allons faire un code procédural sans utiliser de librairies externes afin de rendre le code le plus abordable possible. Dans une seconde partie, nous attaquerons une refactorisation du code avec l'utilisation d'objets et de classes externe afin de rendre le code plus clair et surtout plus réutilisable.
+
+Dans cette version écrite je vous propose de mettre en avant la logique plutôt que de vous coller des grosses tartines de code php.
+
+L'inscription
+Pour la partie inscription, on se retrouve avec un formulaire assez classique qui permettra de créer un enregistrement en base de données. En revanche le système de confirmation par email est un petit peu complexe. Le principe sera de générer un code aléatoire que l'on va associer au compte utilisateur et que l'on enverra ensuite par email. Pour générer ce code on va se créer une petite fonction bien pratique str_random
+
+function str_random($length){
+    $alphabet = "0123456789azertyuiopqsdfghjklmwxcvbnAZERTYUIOPQSDFGHJKLMWXCVBN";
+    return substr(str_shuffle(str_repeat($alphabet, $length)), 0, $length);
+}
+Du coup après avoir validé les informations tapées par l'utilisateur on pourra l'enregistrer en base de données
+
+if(empty($errors)){
+
+    // On enregistre les informations dans la base de données 
+    $req = $pdo->prepare("INSERT INTO users SET username = ?, password = ?, email = ?, confirmation_token = ?");
+    // On ne sauvegardera pas le mot de passe en clair dans la base mais plutôt un hash
+    $password = password_hash($_POST['password'], PASSWORD_BCRYPT);
+    // On génère le token qui servira à la validation du compte 
+    $token = str_random(60);
+    $req->execute([$_POST['username'], $password, $_POST['email'], $token]);
+    $user_id = $pdo->lastInsertId();
+    // On envoit l'email de confirmation
+    mail($_POST['email'], 'Confirmation de votre compte', "Afin de valider votre compte merci de cliquer sur ce lien\n\nhttp://local.dev/Lab/Comptes/confirm.php?id=$user_id&token=$token");
+    // On redirige l'utilisateur vers la page de login avec un message flash
+    $_SESSION['flash']['success'] = 'Un email de confirmation vous a été envoyé pour valider votre compte';
+    header('Location: login.php');
+    exit();
+
+}
+On ne stockera jamais un mot de passe en clair dans notre base de données ! Heureusement PHP intègre des fonctions de chiffrement intégrées que l'on va pouvoir utilisé pour chiffrer et vérifier les mots de passe rentrés par l'utilisateur. Ici nous allons utiliser la fonction password_hash(). Cette fonction permet de créer une nouvelle clef de hashage en utilisant un algorithme de hachage fort (dans notre cas nous utiliserons l'algorithme bcrypt. Attention cependant, le fait de stocker une version chiffré du mot de passe va nous poser plusieurs problèmes :
+
+On ne pourra jamais connaitre le mot de passe original de l'utilisateur, et on ne pourra donc pas lui renvoyé en cas d'oubli
+Pour valider la correspondance d'un mot de passe il faudra utiliser la méthode password_verify pour vérifier que le mot de passe qui est tapé corresponde au hash que l'on a stocké.
+Confirmation du compte
+Nous envoyons donc un lien à l'utilisateur afin qu'il confirme son compte, ce lien contient l'id du compte en question ainsi que le token généré lors de la phase d'inscription. Il nous suffit alors de vérifier que ces 2 informations correspondent.
+
+$user_id = $_GET['id'];
+$token = $_GET['token'];
+require 'inc/db.php';
+$req = $pdo->prepare('SELECT * FROM users WHERE id = ?');
+$req->execute([$user_id]);
+$user = $req->fetch();
+session_start();
+
+if($user && $user->confirmation_token == $token ){
+    $pdo->prepare('UPDATE users SET confirmation_token = NULL, confirmed_at = NOW() WHERE id = ?')->execute([$user_id]);
+    $_SESSION['flash']['success'] = 'Votre compte a bien été validé';
+    $_SESSION['auth'] = $user;
+    header('Location: account.php');
+}else{
+    $_SESSION['flash']['danger'] = "Ce token n'est plus valide";
+    header('Location: login.php');
+}
+Lorsque les informations correspondent on va passer la valeur de confirmation_token à null et on va aussi sauvegarder la date de confirmation dans le champs confirmed_at. Ce champs nous permettra de savoir si oui ou non l'utilisateur a un compte validé ou pas.
+
+Connexion
+La partie connexion s'avère relativement simple à mettre en place. Lorsqu'un utilisateur s'identifie correctement on sauvegardera ses informations dans la session dans l'index auth $_SESSION['auth']. On fera bien attention à rajouter une condition afin de vérifier que le compte de l'utilisateur soit bien confirmé.
+
+if(!empty($_POST) && !empty($_POST['username']) && !empty($_POST['password'])){
+    require_once 'inc/db.php';
+    $req = $pdo->prepare('SELECT * FROM users WHERE (username = :username OR email = :username) AND confirmed_at IS NOT NULL');
+    $req->execute(['username' => $_POST['username']]);
+    $user = $req->fetch();
+    if($user == null){
+        $_SESSION['flash']['danger'] = 'Identifiant ou mot de passe incorrecte';
+    }elseif(password_verify($_POST['password'], $user->password)){
+        $_SESSION['auth'] = $user;
+        $_SESSION['flash']['success'] = 'Vous êtes maintenant connecté';
+        header('Location: account.php');
+        exit();
+    }else{
+        $_SESSION['flash']['danger'] = 'Identifiant ou mot de passe incorrecte';
+    }
+}
+Déconnexion
+Si on peut se connecter il faut évidemment pouvoir se déconnecter. Lors de la déconnexion il suffit de supprimer les informations stockées en session.
+
+
+session_start();
+unset($_SESSION['auth']);
+$_SESSION['flash']['success'] = 'Vous êtes maintenant déconnecté';
+header('Location: login.php');
+Page à accès limité
+Le but dans la mise en place d'un système de compte utilisateur c'est évidemment de proposer des pages qui ne seront accessible qu'aux utilisateurs authentifiés. Vu que la vérification devra se faire dans plusieurs de nos pages on va placer ce code dans une fonction.
+
+function logged_only(){
+    if(session_status() == PHP_SESSION_NONE){
+        session_start();
+    }
+    if(!isset($_SESSION['auth'])){
+        $_SESSION['flash']['danger'] = "Vous n'avez pas le droit d'accéder à cette page";
+        header('Location: login.php');
+        exit();
+    }
+}
+Désolé pour le nom de la fonction, je n'ai pas réussi à trouver un nom qui soit plus approprié. Pensez surtout à mettre un exit après une redirection car un header n'empêche en aucun cas l’exécution du reste du script PHP, ce qui peut entraîner de très mauvaises surprises par la suite.
+
+Édition du compte
+On va créer une petite page qui permettra aux utilisateurs de modifier leurs informations. Pour notre cas on permettra seulement l'édition du mot de passe.
+
+logged_only();
+if(!empty($_POST)){
+
+    if(empty($_POST['password']) || $_POST['password'] != $_POST['password_confirm']){
+        $_SESSION['flash']['danger'] = "Les mots de passes ne correspondent pas";
+    }else{
+        $user_id = $_SESSION['auth']->id;
+        $password= password_hash($_POST['password'], PASSWORD_BCRYPT);
+        require_once 'inc/db.php';
+        $pdo->prepare('UPDATE users SET password = ? WHERE id = ?')->execute([$password,$user_id]);
+        $_SESSION['flash']['success'] = "Votre mot de passe a bien été mis à jour";
+    }
+
+}
+Il n'y a au final rien de bien nouveau à ce niveau là. On utilise la fonction précédemment créée afin de s'assurer que l'utilisateur est bel est bien connecté et on utilisera les informations stockées en session pour savoir quel compte éditer.
+
+Rappel du mot de passe
+Certains utilisateurs sont malheureusement un petit peu tête en l'air et vont oublier le mot de passe utilisé sur le site, il faut donc proposer un outil de rapper du mot de passe. Comme on l'a vu au moment de la création du compte, on n'a pas accès au mot de passe original de l'utilisateur, il nous est donc impossible de lui renvoyer son mot de passe. On va donc envoyer un lien par email qui permettra de choisir un nouveau mot de passe.
+
+On commence donc par demander l'email du compte à récupérer
+
+if(!empty($_POST) && !empty($_POST['email'])){
+    require_once 'inc/db.php';
+    require_once 'inc/functions.php';
+    $req = $pdo->prepare('SELECT * FROM users WHERE email = ? AND confirmed_at IS NOT NULL');
+    $req->execute([$_POST['email']]);
+    $user = $req->fetch();
+    if($user){
+        session_start();
+        $reset_token = str_random(60);
+        $pdo->prepare('UPDATE users SET reset_token = ?, reset_at = NOW() WHERE id = ?')->execute([$reset_token, $user->id]);
+        $_SESSION['flash']['success'] = 'Les instructions du rappel de mot de passe vous ont été envoyées par emails';
+        mail($_POST['email'], 'Réinitiatilisation de votre mot de passe', "Afin de réinitialiser votre mot de passe merci de cliquer sur ce lien\n\nhttp://local.dev/Lab/Comptes/reset.php?id={$user->id}&token=$reset_token");
+        header('Location: login.php');
+        exit();
+    }else{
+        $_SESSION['flash']['danger'] = 'Aucun compte ne correspond à cet adresse';
+    }
+}
+De la même façon que pour la confirmation du compte on va générer une clef que l'on va envoyer par email. On va ensuite valider cette clef et proposer à l'utilisateur de changer son mot de passe.
+
+if(isset($_GET['id']) && isset($_GET['token'])){
+    require 'inc/db.php';
+    require 'inc/functions.php';
+    $req = $pdo->prepare('SELECT * FROM users WHERE id = ? AND reset_token IS NOT NULL AND reset_token = ? AND reset_at > DATE_SUB(NOW(), INTERVAL 30 MINUTE)');
+    $req->execute([$_GET['id'], $_GET['token']]);
+    $user = $req->fetch();
+    if($user){
+        if(!empty($_POST)){
+            if(!empty($_POST['password']) && $_POST['password'] == $_POST['password_confirm']){
+                $password = password_hash($_POST['password'], PASSWORD_BCRYPT);
+                $pdo->prepare('UPDATE users SET password = ?, reset_at = NULL, reset_token = NULL')->execute([$password]);
+                session_start();
+                $_SESSION['flash']['success'] = 'Votre mot de passe a bien été modifié';
+                $_SESSION['auth'] = $user;
+                header('Location: account.php');
+                exit();
+            }
+        }
+    }else{
+        session_start();
+        $_SESSION['flash']['error'] = "Ce token n'est pas valide";
+        header('Location: login.php');
+        exit();
+    }
+}else{
+    header('Location: login.php');
+    exit();
+}
+On vérifie que la demande de réinitialisation a été faite il y a moins de 30 minutes. Si le token et l'id utilisateurs correspondent à un utilisateur de notre base alors on laisse le reste du script s'afficher. Une fois que l'utilisateur rentre un nouveau mot de passe on rentrera dans la conditions if(!empty($_POST)){ où on mettra à jour ses informations. On en profite aussi pour connecter l'utilisateur automatiquement après cette procédure afin de ne pas lui reredemander immédiatement ces informations.
+
+Se souvenir de moi ?
+On a quasiment fini avec notre système à un détail près. Si l'utilisateur ferme son navigateur, sa session sera automatiquement perdu et il devra alors se reconnecter. On va donc proposer une option qui permettra de rester connecter même après avoir fermé son navigateur. Pour cela on va créer une checkbox lors de la connexion, et si elle est cochée on créera un cookie pour se souvenir du compte.
+
+On ne stockera pas directement l'id de l'utilisateur dans le cookies car cela serait beaucoup trop dangereux. En effet les cookies sont stockés sur l'ordinateur de l'utilisateur et peut donc être altéré plutôt facilement pour prendre le contrôle des autres comptes. On va plutôt stocker une clef que l'on validera en PHP lors de la reconnexion.
+
+// dans la partie login 
+if($_POST['remember']){
+    $remember_token = str_random(250);
+    $pdo->prepare('UPDATE users SET remember_token = ? WHERE id = ?')->execute([$remember_token, $user->id]);
+    setcookie('remember', $user->id . '==' . $remember_token . sha1($user->id . 'ratonlaveurs'), time() + 60 * 60 * 24 * 7);
+}
+On donne une durée de vie de 7 jours pour ce cookies, au delà de cette période, les informations seront automatiquement supprimées. On va aussi modifier la partie déconnexion pour rajouter la suppression de ce cookie.
+
+setcookie('remember', NULL, -1);
+Il n'existe pas de fonction pour supprimer un cookie donc on demande de créer une nouveau cookie avec une date négative ce qui entraînera la suppression automatique par le navigateur.
+
+Enfin il faut créer une fonction qui va permettre de connecter l'utilisateur automatiquement si le cookie est présent avec la clef remember.
+
+function reconnect_from_cookie(){
+    if(session_status() == PHP_SESSION_NONE){
+        session_start();
+    }
+    if(isset($_COOKIE['remember']) && !isset($_SESSION['auth']) ){
+        require_once 'db.php';
+        if(!isset($pdo)){
+            global $pdo;
+        }
+        $remember_token = $_COOKIE['remember'];
+        $parts = explode('==', $remember_token);
+        $user_id = $parts[0];
+        $req = $pdo->prepare('SELECT * FROM users WHERE id = ?');
+        $req->execute([$user_id]);
+        $user = $req->fetch();
+        if($user){
+            $expected = $user_id . '==' . $user->remember_token . sha1($user_id . 'ratonlaveurs');
+            if($expected == $remember_token){
+                session_start();
+                $_SESSION['auth'] = $user;
+                setcookie('remember', $remember_token, time() + 60 * 60 * 24 * 7);
+            } else{
+                setcookie('remember', null, -1);
+            }
+        }else{
+            setcookie('remember', null, -1);
+        }
+    }
+}
+Si la reconnexion marche on refait un coup de setcookie afin de mettre à jour la date de péremption du cookie.
+
+Cette fonction peut être utilisé sur la page login ou sur toutes les pages du site pour entraîner une reconnexion globale.
